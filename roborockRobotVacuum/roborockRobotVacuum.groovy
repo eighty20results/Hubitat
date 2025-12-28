@@ -68,6 +68,11 @@ metadata {
         attribute "dockError", "enum", dockErrorCodes.values().collect{ it.toLowerCase() }
         attribute "name", "string"
         attribute "rooms", "JSON_OBJECT"
+        attribute "roomMapping", "JSON_OBJECT"
+        attribute "currentRoom", "JSON_OBJECT"
+        attribute "currentSegmentId", "string"
+        attribute "currentRoomId", "string"
+        attribute "currentRoomName", "string"
         attribute "scenes", "JSON_OBJECT"
         attribute "state", "enum", stateCodes.values().collect{ it.toLowerCase() }   
         attribute "error", "enum", errorCodes.values().collect{ it.toLowerCase() }
@@ -415,6 +420,9 @@ void processEvent(String name, def value) {
     case "rooms":
         sendEventX(name: "rooms", value: JsonOutput.toJson(value), descriptionText: "rooms set to $value")
         break
+    case "roomMapping":
+        sendEventX(name: "roomMapping", value: JsonOutput.toJson(value), descriptionText: "roomMapping set to $value")
+        break
     case "scenes":
         sendEventX(name: "scenes", value: JsonOutput.toJson(value), descriptionText: "scenes set to $value")
         break
@@ -545,6 +553,10 @@ void processEvent(String name, def value) {
     case "wash_ready":
     case "wash_phase":
     case "rdt":
+    case "segment_id":
+        updateCurrentRoomFromSegmentId(value?.toString())
+        break
+
     case "last_clean_t":
     case "kct":
     case "in_warmup":
@@ -631,16 +643,55 @@ void processMsg(Map message) {
     } 
 }
 
+
+void updateCurrentRoomFromSegmentId(String segmentId) {
+    // segment_id from get_status represents the currently active room/segment during segment cleaning.
+    // Clear/null semantics: clear state, and emit empty strings + JSON object with nulls.
+    Boolean shouldClear = (!segmentId || segmentId == "0" || segmentId == "-1")
+    if(shouldClear) {
+        state.currentSegmentId = null
+        state.currentRoom = null
+        sendEventX(name: "currentSegmentId", value: "", descriptionText: "current segment id cleared")
+        sendEventX(name: "currentRoomId", value: "", descriptionText: "current room id cleared")
+        sendEventX(name: "currentRoomName", value: "", descriptionText: "current room name cleared")
+        sendEventX(name: "currentRoom", value: JsonOutput.toJson([segmentId: null, roomId: null, name: null]), descriptionText: "current room cleared")
+        return
+    }
+
+    state.currentSegmentId = segmentId
+    Map mapping = state?.roomMappingBySegment?.get(segmentId)
+    String roomId = mapping?.roomId
+    String roomName = mapping?.name
+    state.currentRoom = [segmentId: segmentId, roomId: roomId, name: roomName]
+
+    sendEventX(name: "currentSegmentId", value: segmentId, descriptionText: "current segment id is $segmentId")
+    sendEventX(name: "currentRoomId", value: (roomId ?: ""), descriptionText: (roomId ? "current room id is $roomId" : "current room id cleared"))
+    sendEventX(name: "currentRoomName", value: (roomName ?: ""), descriptionText: (roomName ? "current room name is $roomName" : "current room name cleared"))
+    sendEventX(name: "currentRoom", value: JsonOutput.toJson([segmentId: segmentId, roomId: roomId, name: roomName]), descriptionText: "current room set to segmentId $segmentId, roomId $roomId, name $roomName")
+}
+
 void setRoomsValue(Map get_room_mapping) {
     logDebug "executing 'setRoomsValue()'"
     Map roomsMap = getHomeDataResult()?.rooms?.collectEntries { [(it.id.toString()): it.name] }
     if(roomsMap && get_room_mapping) {
-        Map rooms = get_room_mapping?.result.collectEntries { mapping ->
+        Map roomMapping = get_room_mapping?.result.collectEntries { mapping ->
+            String segmentId = mapping[0].toString()
             String roomId = mapping[1].toString()
             String roomName = roomsMap[roomId]
-            return [(mapping[0].toString()):roomName]
+            return [(segmentId): [roomId: roomId, name: roomName]]
         }
+        // Backwards-compatible: keep existing 'rooms' attribute as segmentId -> roomName
+        Map rooms = roomMapping?.collectEntries { segmentId, mapping ->
+            return [(segmentId.toString()): mapping?.name]
+        }
+        state.roomMappingBySegment = roomMapping
         processEvent("rooms", rooms?.sort())
+        processEvent("roomMapping", roomMapping?.sort())
+
+        // Re-resolve current room name/id if we already have a segment id from get_status
+        if(state?.currentSegmentId) {
+            updateCurrentRoomFromSegmentId(state.currentSegmentId?.toString())
+        }
     }
 }
 
