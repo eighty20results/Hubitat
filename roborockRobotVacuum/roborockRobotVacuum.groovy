@@ -19,7 +19,7 @@
  *  Author: bloodtick
  *  Date: 2024-04-18
  */
-public static String version() {return "1.1.12"}
+public static String version() {return "1.1.12.1"}
 
 import groovy.json.JsonOutput
 import groovy.json.JsonSlurper
