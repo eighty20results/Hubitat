@@ -69,7 +69,7 @@ metadata {
         attribute "name", "string"
         attribute "rooms", "JSON_OBJECT"
         attribute "scenes", "JSON_OBJECT"
-        attribute "currentScene", "JSON_OBJECT"  // or JSON_OBJECT with {id, name}
+        attribute "currentScene", "JSON_OBJECT"  // Contains {id, name} of executing scene
         attribute "currentSceneId", "string"
         attribute "state", "enum", stateCodes.values().collect{ it.toLowerCase() }   
         attribute "error", "enum", errorCodes.values().collect{ it.toLowerCase() }
@@ -666,6 +666,7 @@ void processMsg(Map message) {
 }
 
 void clearSceneExecutionFlag() {
+    unschedule('clearSceneExecutionFlag')
     state.remove('sceneJustExecuted')
 }
 
@@ -1085,7 +1086,7 @@ void getDeviceScenes() {
 
 private Boolean hasActiveScene() {
     String sceneJson = device.currentValue("currentScene")
-    if (!sceneJson || sceneJson == "{}" || sceneJson == "{}") return false
+    if (!sceneJson || sceneJson == "{}" || sceneJson == "") return false
     try {
         Map scene = new JsonSlurper().parseText(sceneJson) as Map
         return scene?.id != null
@@ -1157,6 +1158,7 @@ void asyncHttpCallback(resp, data) {
                     String sceneName = allScenes[data.sceneId.toString()] ?: "Unknown Scene"
                     Map currentScene = [id: data.sceneId, name: sceneName]
                     processEvent("currentScene", currentScene)
+                    processEvent("currentSceneId", data.sceneId)
                 } else {
                     logWarn "rejected sceneId:$data.sceneId response:${respJson}"
                 }
