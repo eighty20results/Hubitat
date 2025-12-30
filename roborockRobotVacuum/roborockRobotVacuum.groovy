@@ -69,6 +69,8 @@ metadata {
         attribute "name", "string"
         attribute "rooms", "JSON_OBJECT"
         attribute "scenes", "JSON_OBJECT"
+        attribute "currentScene", "JSON_OBJECT"  // or JSON_OBJECT with {id, name}
+        attribute "currentSceneId", "string"
         attribute "state", "enum", stateCodes.values().collect{ it.toLowerCase() }   
         attribute "error", "enum", errorCodes.values().collect{ it.toLowerCase() }
         attribute "fanPower", "enum", fanPowerCodes.values().collect{ it.toLowerCase() }
@@ -400,8 +402,14 @@ void processEvent(String name, def value) {
         String valueEnum = mopWaterModeCodes[value?.toInteger()]?.toLowerCase() ?: value
         sendEventX(name: "mopWaterMode", value: valueEnum, descriptionText: "mop water mode is $valueEnum ($value)")        
         break
-    case "switch":    
-        sendEventX(name: "switch", value: value, descriptionText: "switch is $value")        
+    case "switch":
+        sendEventX(name: "switch", value: value, descriptionText: "switch is $value")
+        // Clear scene if manually started (not from scene)
+        if(value == "on" && !state.pendingScene) {
+            processEvent("currentScene", null)
+            processEvent("currentSceneId", null)
+        }
+        break
         break
     case "name":
         sendEventX(name: "name", value: value, descriptionText: "name set to $value")
@@ -418,6 +426,16 @@ void processEvent(String name, def value) {
     case "scenes":
         sendEventX(name: "scenes", value: JsonOutput.toJson(value), descriptionText: "scenes set to $value")
         break
+    case "currentSceneId":
+        sendEventX(name: "currentSceneId", value: value, descriptionText: "current scene ID set to $value")
+        break
+    case "currentScene":
+        if(value) {
+            sendEventX(name: "currentScene", value: JsonOutput.toJson(value), descriptionText: "executing scene: ${value.name} (${value.id})")
+        } else {
+            sendEventX(name: "currentScene", value: JsonOutput.toJson([:]), descriptionText: "scene cleared")
+        }
+        break
     case "rpc_request":
         break
     case "rpc_response":
@@ -429,8 +447,16 @@ void processEvent(String name, def value) {
     case "state":
         String valueEnum = stateCodes[value?.toInteger()]?.toLowerCase() ?: value
         sendEventX(name: "state", value: valueEnum, descriptionText: "state is $valueEnum ($value)")
+
+        // Clear current scene when returning to dock, charging, or idle
+        if(value?.toInteger() == 22 ) { // Emptying Dust Bin
+            String currentSceneJson = device.currentValue("currentScene")
+            if(currentSceneJson && currentSceneJson != "{}") {
+                processEvent("currentScene", null)
+            }
+        }
         break
-    case "battery": 
+    case "battery":
         sendEventX(name: "battery", value: value.toInteger(), unit: "%", descriptionText: "battery level is $value%")
         break
     case "fan_power":
@@ -463,6 +489,18 @@ void processEvent(String name, def value) {
     case "task_cancel_in_motion":
     case "charge_status":
     case "drying_status":
+        break
+    case "switch":
+        sendEventX(name: "switch", value: value, descriptionText: "switch is $value")
+        // Clear scene if manually started (scene executions set this before triggering)
+        if(value == "on") {
+            String currentSceneJson = device.currentValue("currentScene")
+            // Only clear if there's a scene and we didn't just set it
+            if(currentSceneJson && currentSceneJson != "{}" && !state.sceneJustExecuted) {
+                processEvent("currentScene", null)
+            }
+            state.remove('sceneJustExecuted')
+        }
         break
     case "sensor_dirty_time":
         Integer percentAvail = Math.max(0, (100 - Math.floor((value.toInteger() / (life.sensor * 60 * 60)) * 100).toInteger()))
@@ -1046,20 +1084,21 @@ void getDeviceScenes() {
 }
 
 void setDeviceScene(String sceneId) {
+    state.sceneJustExecuted = true
     Map rriot = getLoginData()?.rriot
     String path = "/user/scene/$sceneId/execute"
     Map params = [
-        uri: rriot?.r?.a,
-        path: path,
-        headers: [ 'Authorization': getHawkAuthentication(rriot?.u, rriot?.s, rriot?.h, path) ],
-        contentType: "application/json",
-        body: [ sceneId: sceneId ]
+            uri: rriot?.r?.a,
+            path: path,
+            headers: [ 'Authorization': getHawkAuthentication(rriot?.u, rriot?.s, rriot?.h, path) ],
+            contentType: "application/json",
+            body: [ sceneId: sceneId ]
     ]
     try {
-	    asynchttpPost("asyncHttpCallback", params, [method: "setDeviceScene", sceneId: sceneId, params:params])
-	} catch (e) {
-	    logWarn "'setDeviceScene()' asynchttpPost() error: $e"
-	}
+        asynchttpPost("asyncHttpCallback", params, [method: "setDeviceScene", sceneId: sceneId, params:params])
+    } catch (e) {
+        logWarn "'setDeviceScene()' asynchttpPost() error: $e"
+    }
 }
 
 void asyncHttpCallback(resp, data) {
@@ -1095,7 +1134,16 @@ void asyncHttpCallback(resp, data) {
                 processEvent("scenes", scenes?.sort())
                 break
             case "setDeviceScene":
-                logInfo "${respJson?.status=="ok"?"accepted":"rejected"} sceneId:$data.sceneId"
+                if(respJson?.status=="ok") {
+                    logInfo "accepted sceneId:$data.sceneId"
+                    // Store the current scene as JSON object with id and name
+                    Map allScenes = new JsonSlurper().parseText(device.currentValue("scenes") ?: "{}")
+                    String sceneName = allScenes[data.sceneId.toString()] ?: "Unknown Scene"
+                    Map currentScene = [id: data.sceneId, name: sceneName]
+                    processEvent("currentScene", currentScene)
+                } else {
+                    logInfo "rejected sceneId:$data.sceneId"
+                }
                 break
             default:
                 logWarn "asyncHttpGetCallback() ${data?.method} not supported"
