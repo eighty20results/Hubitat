@@ -404,12 +404,20 @@ void processEvent(String name, def value) {
         break
     case "switch":
         sendEventX(name: "switch", value: value, descriptionText: "switch is $value")
-        // Clear scene if manually started (not from scene)
-        if(value == "on" && !state.pendingScene) {
-            processEvent("currentScene", null)
-            processEvent("currentSceneId", null)
+        // Clear scene if manually started (scene executions set this before triggering)
+        if(value == "on") {
+            String currentSceneJson = device.currentValue("currentScene")
+            String currentSceneId = device.currentValue("currentSceneId")
+            // Only clear if there's a scene and we didn't just set it
+            if(currentSceneJson && hasActiveScene() && !state.sceneJustExecuted) {
+                processEvent("currentScene", null)
+            }
+            // Only clear if there's a scene ID and we didn't just set it
+            if(currentSceneId && !state.sceneJustExecuted) {
+                processEvent("currentSceneId", null)
+            }
+            clearSceneExecutionFlag()
         }
-        break
         break
     case "name":
         sendEventX(name: "name", value: value, descriptionText: "name set to $value")
@@ -448,7 +456,7 @@ void processEvent(String name, def value) {
         String valueEnum = stateCodes[value?.toInteger()]?.toLowerCase() ?: value
         sendEventX(name: "state", value: valueEnum, descriptionText: "state is $valueEnum ($value)")
 
-        // Clear current scene when returning to dock, charging, or idle
+        // Clear current scene when emptying dust bin (end of cleaning cycle)
         if(value?.toInteger() == 22 ) { // Emptying Dust Bin
             String currentSceneJson = device.currentValue("currentScene")
             if(currentSceneJson && currentSceneJson != "{}") {
@@ -489,18 +497,6 @@ void processEvent(String name, def value) {
     case "task_cancel_in_motion":
     case "charge_status":
     case "drying_status":
-        break
-    case "switch":
-        sendEventX(name: "switch", value: value, descriptionText: "switch is $value")
-        // Clear scene if manually started (scene executions set this before triggering)
-        if(value == "on") {
-            String currentSceneJson = device.currentValue("currentScene")
-            // Only clear if there's a scene and we didn't just set it
-            if(currentSceneJson && currentSceneJson != "{}" && !state.sceneJustExecuted) {
-                processEvent("currentScene", null)
-            }
-            state.remove('sceneJustExecuted')
-        }
         break
     case "sensor_dirty_time":
         Integer percentAvail = Math.max(0, (100 - Math.floor((value.toInteger() / (life.sensor * 60 * 60)) * 100).toInteger()))
@@ -667,6 +663,10 @@ void processMsg(Map message) {
             qClear()
         }
     } 
+}
+
+void clearSceneExecutionFlag() {
+    state.remove('sceneJustExecuted')
 }
 
 void setRoomsValue(Map get_room_mapping) {
@@ -1083,8 +1083,21 @@ void getDeviceScenes() {
 	}
 }
 
+private Boolean hasActiveScene() {
+    String sceneJson = device.currentValue("currentScene")
+    if (!sceneJson || sceneJson == "{}" || sceneJson == "{}") return false
+    try {
+        Map scene = new JsonSlurper().parseText(sceneJson) as Map
+        return scene?.id != null
+    } catch (Exception e) {
+        return false
+    }
+}
+
 void setDeviceScene(String sceneId) {
     state.sceneJustExecuted = true
+    runIn(5, "clearSceneExecutionFlag")
+
     Map rriot = getLoginData()?.rriot
     String path = "/user/scene/$sceneId/execute"
     Map params = [
@@ -1098,6 +1111,7 @@ void setDeviceScene(String sceneId) {
         asynchttpPost("asyncHttpCallback", params, [method: "setDeviceScene", sceneId: sceneId, params:params])
     } catch (e) {
         logWarn "'setDeviceScene()' asynchttpPost() error: $e"
+        clearSceneExecutionFlag()
     }
 }
 
@@ -1137,12 +1151,14 @@ void asyncHttpCallback(resp, data) {
                 if(respJson?.status=="ok") {
                     logInfo "accepted sceneId:$data.sceneId"
                     // Store the current scene as JSON object with id and name
-                    Map allScenes = new JsonSlurper().parseText(device.currentValue("scenes") ?: "{}")
+                    String scenesJson = device.currentValue("scenes")
+                    Map allScenes = ((scenesJson && scenesJson != "{}") ?
+                            new JsonSlurper().parseText(scenesJson) : [:]) as Map
                     String sceneName = allScenes[data.sceneId.toString()] ?: "Unknown Scene"
                     Map currentScene = [id: data.sceneId, name: sceneName]
                     processEvent("currentScene", currentScene)
                 } else {
-                    logInfo "rejected sceneId:$data.sceneId"
+                    logWarn "rejected sceneId:$data.sceneId response:${respJson}"
                 }
                 break
             default:
