@@ -270,12 +270,14 @@ def refresh(Map data=[type:1]) {
 }
 
 def execute(String command, String args=null) {
-    // I have no idea if this conversion works for everything. It works for somethings... ;) 
+    // I have no idea if this conversion works for everything. It works for somethings... ;)
     def param = args ? convertNumbers((new JsonSlurper().parseText(args))) : []
     // reduce info logging on these cyclic checks
     Closure logFunction = [ "get_prop", "get_room_mapping", "get_consumable" ].find{ it == command } ? this.&logDebug : this.&logInfo
     logFunction( "executing execute(command:$command, param:$param)" )
-    
+
+    // Initialize state.sequence if null to prevent null pointer exceptions
+    if(state.sequence == null) state.sequence = (new Random().nextInt(2000) + 1)
     Integer id = (Integer)(state.sequence++ & 0xFFFFFFFF)
     qPush([duid: getDeviceId(), command: command, param: param, id:id])
     if(qSize()<=1) executeQueue()
